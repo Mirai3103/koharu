@@ -170,6 +170,7 @@ impl Default for PipelineConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(default)]
 pub struct TranslationConfig {
     pub model: koharu_translator::ModelSelection,
     pub generation: GenerationConfig,

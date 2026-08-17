@@ -40,6 +40,7 @@ koharu-renderer = { path = "crates/koharu-renderer" }
 koharu-rasterizer = { path = "crates/koharu-rasterizer", default-features = false }
 koharu-desktop = { path = "crates/koharu-desktop" }
 koharu-secrets = { path = "crates/koharu-secrets" }
+koharu-server = { path = "crates/koharu-server" }
 
 # external dependencies
 alphanumeric-sort = "1.5.8"
@@ -83,6 +84,8 @@ reqwest = { version = "0.13.4", features = ["stream", "json", "form", "blocking"
 secrecy = { version = "0.10.3", features = ["serde"] }
 reqwest-middleware = "0.5.2"
 reqwest-retry = "0.9.1"
+axum = { version = "0.8", features = ["multipart", "json"] }
+tower-http = { version = "0.6", features = ["trace"] }
 toml = "1.1.4"
 url = { version = "2.5.8", features = ["serde"] }
 petgraph = "0.8.3"
