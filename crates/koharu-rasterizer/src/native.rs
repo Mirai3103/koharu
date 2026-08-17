@@ -10,7 +10,6 @@ use vello::{
     AaConfig, AaSupport, RenderParams, RendererOptions, Scene,
     kurbo::Affine,
     peniko::Color,
-    util::RenderContext,
     wgpu::{
         self, Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d,
         TexelCopyBufferInfo, Texture, TextureDescriptor, TextureFormat, TextureUsages, TextureView,
@@ -20,7 +19,6 @@ use vello::{
 use crate::{CompositionCommand, Error, Frame, GpuCompositor, RasterDraw, Result};
 
 const MAX_SUPERSAMPLING_FACTOR: u32 = 4;
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DownsampleFilter {
     Nearest,
@@ -80,8 +78,8 @@ pub struct Raster {
 }
 
 struct GpuState {
-    context: RenderContext,
-    device_id: usize,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
     renderer: vello::Renderer,
     compositor: GpuCompositor,
     targets: Vec<RenderTarget>,
@@ -107,22 +105,38 @@ impl Rasterizer {
     }
 
     fn try_new() -> AnyResult<Self> {
-        let mut context = RenderContext::new();
-        let device_id = pollster::block_on(context.device(None))
-            .context("no WGPU adapter supports Vello's required features")?;
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter = pollster::block_on(wgpu::util::initialize_adapter_from_env_or_default(
+            &instance, None,
+        ))
+        .context("no WGPU adapter supports Vello's required features")?;
+        // vello 0.10's `RenderContext::device` requests the device with
+        // `wgpu::Limits::default()`, capping `max_texture_dimension_2d` at 8192
+        // and rejecting tall comic pages. Request the adapter's own limits so
+        // surfaces up to the real device maximum (e.g. 32768 on recent NVIDIA
+        // GPUs) rasterize without tiling.
+        let device_features = wgpu::Features::CLEAR_TEXTURE | wgpu::Features::PIPELINE_CACHE;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: None,
+            required_features: adapter.features() & device_features,
+            required_limits: adapter.limits(),
+            ..Default::default()
+        }))
+        .context("failed to create WGPU device")?;
         let renderer = vello::Renderer::new(
-            &context.devices[device_id].device,
+            &device,
             RendererOptions {
                 antialiasing_support: AaSupport::area_only(),
                 ..Default::default()
             },
         )
         .map_err(|error| anyhow!("failed to create Vello renderer: {error:?}"))?;
-        let compositor = GpuCompositor::new(&context.devices[device_id].device);
+        let compositor = GpuCompositor::new(&device);
         Ok(Self {
             gpu: Mutex::new(GpuState {
-                context,
-                device_id,
+                device,
+                queue,
                 renderer,
                 compositor,
                 targets: Vec::new(),
@@ -269,19 +283,17 @@ impl Rasterizer {
         let (device, submission, target) = {
             let mut gpu = self.gpu.lock();
             let GpuState {
-                context,
-                device_id,
+                device,
+                queue,
                 renderer,
                 compositor,
                 targets,
             } = &mut *gpu;
-            let device = context.devices[*device_id].device.clone();
-            let queue = &context.devices[*device_id].queue;
-            check_device_limit(&device, width, height)?;
-            let target = take_target(targets, &device, width, height)?;
+            check_device_limit(device, width, height)?;
+            let target = take_target(targets, device, width, height)?;
             compositor
                 .render(
-                    &device,
+                    device,
                     queue,
                     renderer,
                     &target.view,
@@ -308,7 +320,7 @@ impl Rasterizer {
                 size,
             );
             let submission = queue.submit([encoder.finish()]);
-            (device, submission, target)
+            (device.clone(), submission, target)
         };
         self.finish_readback(device, submission, target)
     }
@@ -328,19 +340,17 @@ impl Rasterizer {
         let (device, submission, target) = {
             let mut gpu = self.gpu.lock();
             let GpuState {
-                context,
-                device_id,
+                device,
+                queue,
                 renderer,
                 compositor: _,
                 targets,
             } = &mut *gpu;
-            let device = context.devices[*device_id].device.clone();
-            let queue = &context.devices[*device_id].queue;
-            check_device_limit(&device, width, height)?;
-            let target = take_target(targets, &device, width, height)?;
+            check_device_limit(device, width, height)?;
+            let target = take_target(targets, device, width, height)?;
             renderer
                 .render_to_texture(
-                    &device,
+                    device,
                     queue,
                     scene,
                     &target.view,
@@ -368,7 +378,7 @@ impl Rasterizer {
                 size,
             );
             let submission = queue.submit([encoder.finish()]);
-            (device, submission, target)
+            (device.clone(), submission, target)
         };
         self.finish_readback(device, submission, target)
     }
@@ -513,4 +523,29 @@ fn finish_raster(
 
 fn rgba([r, g, b, a]: [u8; 4]) -> Color {
     Color::from_rgba8(r, g, b, a)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Reproduces the server failure on a 720x12950 comic page: vello 0.10's
+    // RenderContext requests the WGPU device with `Limits::default()`, capping
+    // `max_texture_dimension_2d` at 8192 even though the adapter supports more.
+    // Rasterizing a surface taller than 8192 must not be rejected.
+    #[test]
+    fn rasterizes_tall_surface_beyond_default_wgpu_limit() {
+        let rasterizer = Rasterizer::new().expect("rasterizer");
+        let scene = Scene::new();
+        let raster = rasterizer
+            .rasterize_scene(
+                &scene,
+                720,
+                12950,
+                [255, 255, 255, 255],
+                RasterOptions::default(),
+            )
+            .expect("rasterize tall surface");
+        assert_eq!(raster.dimensions(), (720, 12950));
+    }
 }
