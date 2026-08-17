@@ -14,7 +14,6 @@ use crate::{
 pub struct Pipeline {
     current: Arc<ArcSwap<StageRunner>>,
     resources: Arc<ResourceMonitor>,
-    execution: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Pipeline {
@@ -63,7 +62,6 @@ impl Pipeline {
         Ok(Self {
             current,
             resources,
-            execution: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -79,7 +77,6 @@ impl Pipeline {
         request: Request,
         committer: &mut dyn Committer,
     ) -> std::result::Result<Report, PipelineError> {
-        let _execution = self.execution.lock().await;
         Execution::new(
             self.current.load_full(),
             self.resources.clone(),
